@@ -1,0 +1,146 @@
+name: webapp-stack
+
+networks:
+  frontend-network:
+    driver: bridge
+  backend-network:
+    driver: bridge
+  default:
+    external: true
+    name: supabase_default
+    
+volumes:
+  nginx_logs:
+  app_logs:
+
+services:
+  # Frontend Application (Lead Persona Dashboard - Vite React)
+  webapp:
+    build:
+      context: ../../apps/frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_SUPABASE_URL=http://217.154.211.42:8000
+        - VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+    container_name: lead-dashboard
+    restart: unless-stopped
+    ports:
+      - "217.154.211.42:80:3000"
+    environment:
+      - VITE_SUPABASE_URL=http://217.154.211.42:8000
+      - VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+      - VITE_APP_ENV=production
+    networks:
+      - frontend-network
+      - backend-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - app_logs:/app/logs
+    depends_on:
+      - supabase-kong
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.webapp.rule=Host(`217.154.211.42`) && PathPrefix(`/`)"
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: webapp-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../nginx/sites-available:/etc/nginx/sites-available:ro
+      - ../nginx/conf.d:/etc/nginx/conf.d:ro
+      - nginx_logs:/var/log/nginx
+    networks:
+      - frontend-network
+      - backend-network
+    depends_on:
+      - webapp
+      - supabase-kong
+      - supabase-studio
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Supabase Services (External network integration)
+  supabase-kong:
+    image: kong:2.8.1
+    container_name: supabase-kong
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "8443:8443"
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /var/lib/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,basic-auth
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+    volumes:
+      - /root/supabase-setup/volumes/api/kong.yml:/var/lib/kong/kong.yml:ro
+    networks:
+      - backend-network
+      - default
+    external_links:
+      - supabase-db:db
+      - supabase-auth:auth
+      - supabase-rest:rest
+      - supabase-storage:storage
+      - supabase-realtime:realtime
+
+  supabase-studio:
+    image: supabase/studio:2025.06.02-sha-8f2993d
+    container_name: supabase-studio
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DEFAULT_ORGANIZATION_NAME: ${STUDIO_DEFAULT_ORGANIZATION}
+      DEFAULT_PROJECT_NAME: ${STUDIO_DEFAULT_PROJECT}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: http://217.154.211.42:8000
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+    networks:
+      - backend-network
+      - default
+    external_links:
+      - supabase-meta:meta
+
+  # Health Check Service
+  healthcheck:
+    image: alpine:latest
+    container_name: webapp-healthcheck
+    restart: "no"
+    command: |
+      sh -c '
+        apk add --no-cache curl &&
+        while true; do
+          echo "Health check at $$(date)"
+          curl -f http://nginx/health || echo "Nginx health check failed"
+          curl -f http://webapp:3000/api/health || echo "WebApp health check failed"  
+          curl -f http://supabase-kong:8000/health || echo "Supabase health check failed"
+          sleep 60
+        done
+      '
+    networks:
+      - frontend-network
+      - backend-network
+    depends_on:
+      - nginx
+      - webapp
+
+# Networks defined above
